@@ -147,6 +147,11 @@ def run():
     if "--test-scales" in sys.argv:
         sys.argv.remove("--test-scales")
         custom_test_scales = True
+    
+    pairwise_matrix = False
+    if "--pairwise-matrix" in sys.argv:
+        sys.argv.remove("--pairwise-matrix")
+        pairwise_matrix = True
 
     # Enable expandable segments to reduce memory fragmentation on multi-GPU setups.
     if (
@@ -359,7 +364,7 @@ def run():
         best_batch_size = 128
         best_performance = 128
 
-        while batch_size <= settings.max_batch_size:
+        while batch_size <= 256:
             print(f"* Trying batch size [bold]{batch_size}[/]... ", end="")
 
             prompts = good_prompts * math.ceil(batch_size / len(good_prompts))
@@ -503,6 +508,68 @@ def run():
             print()
             print(table)
             print(f"\n[bold green]Successfully saved data to {csv_filename}![/bold green]")
+            return
+        elif pairwise_matrix:
+            import csv
+            from rich.table import Table
+            
+            print("\n[bold cyan]Generating Pairwise KLD Matrix...[/]")
+            
+            # Reset Heretic's internal state so its default adapter is clean
+            model.reset_model()
+            
+            adapter_base_dir = settings.evaluate_model 
+            adapter_dirs = [d for d in os.listdir(adapter_base_dir) 
+                            if os.path.isdir(os.path.join(adapter_base_dir, d)) and d.startswith('lora_')]
+            adapter_dirs.sort()
+            
+            if not adapter_dirs:
+                print(f"[red]Error: No adapters found in {adapter_base_dir}[/red]")
+                return
+
+            # Load all adapters into memory
+            for adir in adapter_dirs:
+                print(f"* Loading {adir} into memory...")
+                adapter_path = os.path.join(adapter_base_dir, adir)
+                model.model.load_adapter(adapter_path, adapter_name=adir)
+
+            import time as local_time
+            csv_filename = f"pairwise_kld_matrix_{int(local_time.time())}.csv"
+            
+            matrix_data = []
+            
+            # Open CSV early to flush data line-by-line in case of a crash
+            with open(csv_filename, mode='w', newline='') as file:
+                fieldnames = ["Baseline_Adapter"] + adapter_dirs
+                writer = csv.DictWriter(file, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                # OUTER LOOP: Establish the "Baseline" Distribution
+                for adapter_A in adapter_dirs:
+                    print(f"\n[bold yellow]--- Setting {adapter_A} as baseline ---[/]")
+                    model.model.set_adapter(adapter_A)
+                    
+                    # Re-initialize Evaluator to calculate Model A's distribution
+                    print("* Calculating baseline probability distribution...")
+                    current_evaluator = Evaluator(settings, model)
+                    
+                    row_data = {"Baseline_Adapter": adapter_A}
+                    
+                    # INNER LOOP: Compare everyone else to the Baseline
+                    for adapter_B in adapter_dirs:
+                        print(f"  * Comparing {adapter_B} to {adapter_A}...")
+                        model.model.set_adapter(adapter_B)
+                        
+                        # get_score() now computes KLD(B || A)
+                        score, kl_div, refusals = current_evaluator.get_score()
+                        row_data[adapter_B] = kl_div
+                        
+                    # Write the row to the CSV
+                    writer.writerow(row_data)
+                    file.flush()
+                    matrix_data.append(row_data)
+                    
+            print(f"\n[bold green]Successfully saved Pairwise KLD Matrix to {csv_filename}![/]")
             return
 
         settings.model = settings.evaluate_model

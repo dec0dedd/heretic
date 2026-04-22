@@ -31,6 +31,7 @@ dependencies = [
     "kernels~=0.12",
     "langdetect~=1.0",
     "lm-eval[hf]~=0.4",
+    "matplotlib>=3.10.8",
     "numpy~=2.2",
     "optuna~=4.7",
     "peft~=0.18",
@@ -38,6 +39,7 @@ dependencies = [
     "pydantic-settings~=2.13",
     "questionary~=2.1",
     "rich~=14.3",
+    "seaborn>=0.13.2",
     "tqdm~=4.67",
     "transformers~=5.3",
 ]
