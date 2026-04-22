@@ -452,19 +452,11 @@ def run():
 
         if custom_test_scales:
             import csv
-            from peft import PeftModel
             from rich.table import Table
             
-            print("\n[bold cyan]Running Multi-Adapter Evaluation...[/]")            
-            if hasattr(model.model, "unload"):
-                print("* Stripping internal Heretic adapters...")
-                hf_model = model.model.unload()
-                if hasattr(hf_model, "peft_config"):
-                    delattr(hf_model, "peft_config")
-            else:
-                hf_model = model.model
+            print("\n[bold cyan]Running Multi-Adapter Evaluation...[/]")
             
-            hf_model.eval()
+            model.reset_model()
             
             adapter_base_dir = settings.evaluate_model 
             adapter_dirs = [d for d in os.listdir(adapter_base_dir) 
@@ -475,6 +467,14 @@ def run():
                 print(f"[red]Error: No folders starting with 'lora_' found in {adapter_base_dir}[/red]")
                 return
 
+            # 2. THE FIX: Load adapters DIRECTLY into Heretic's existing PEFT wrapper.
+            # Do NOT use PeftModel.from_pretrained, which double-wraps the model!
+            for adir in adapter_dirs:
+                print(f"* Loading {adir} into memory...")
+                adapter_path = os.path.join(adapter_base_dir, adir)
+                model.model.load_adapter(adapter_path, adapter_name=adir)
+
+            # --- Evaluation Loop ---
             table = Table(title="Adapter Pareto Frontier")
             table.add_column("Adapter", justify="left", style="cyan")
             table.add_column("Refusals", justify="right", style="red")
@@ -482,20 +482,6 @@ def run():
             
             import time as local_time
             csv_filename = f"adapter_metrics_{int(local_time.time())}.csv"
-            print(f"* Live data will be saved to [bold green]{csv_filename}[/bold green]")
-            
-            # Initialize unified PeftModel wrapper around the CLEAN base model
-            print(f"* Initializing with {adapter_dirs[0]}...")
-            first_adapter_path = os.path.join(adapter_base_dir, adapter_dirs[0])
-            peft_wrapped_model = PeftModel.from_pretrained(hf_model, first_adapter_path, adapter_name=adapter_dirs[0])
-            
-            # Load the remaining adapters into the same wrapper
-            for adir in adapter_dirs[1:]:
-                print(f"* Loading {adir} into memory...")
-                peft_wrapped_model.load_adapter(os.path.join(adapter_base_dir, adir), adapter_name=adir)
-            
-            # Put the unified model back into Heretic's container
-            model.model = peft_wrapped_model
             
             with open(csv_filename, mode='w', newline='') as file:
                 writer = csv.writer(file)
@@ -503,6 +489,8 @@ def run():
                 
                 for adir in adapter_dirs:
                     print(f"* Testing adapter: [bold]{adir}[/bold]...")
+                    
+                    # Switch to our specific LoRA scale
                     model.model.set_adapter(adir)
                     
                     score, kl_div, refusals = evaluator.get_score()
