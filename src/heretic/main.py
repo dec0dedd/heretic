@@ -142,8 +142,12 @@ def obtain_merge_strategy(settings: Settings) -> str | None:
     else:
         return "merge"
 
-
 def run():
+    custom_test_scales = False
+    if "--test-scales" in sys.argv:
+        sys.argv.remove("--test-scales")
+        custom_test_scales = True
+
     # Enable expandable segments to reduce memory fragmentation on multi-GPU setups.
     if (
         "PYTORCH_ALLOC_CONF" not in os.environ
@@ -351,9 +355,9 @@ def run():
         print()
         print("Determining optimal batch size...")
 
-        batch_size = 1
-        best_batch_size = -1
-        best_performance = -1
+        batch_size = 128
+        best_batch_size = 128
+        best_performance = 128
 
         while batch_size <= settings.max_batch_size:
             print(f"* Trying batch size [bold]{batch_size}[/]... ", end="")
@@ -445,10 +449,79 @@ def run():
     if settings.evaluate_model is not None:
         print()
         print(f"Loading model [bold]{settings.evaluate_model}[/]...")
+
+        if custom_test_scales:
+            import csv
+            from peft import PeftModel
+            from rich.table import Table
+            
+            print("\n[bold cyan]Running Multi-Adapter Evaluation...[/]")            
+            if hasattr(model.model, "unload"):
+                print("* Stripping internal Heretic adapters...")
+                hf_model = model.model.unload()
+                if hasattr(hf_model, "peft_config"):
+                    delattr(hf_model, "peft_config")
+            else:
+                hf_model = model.model
+            
+            hf_model.eval()
+            
+            adapter_base_dir = settings.evaluate_model 
+            adapter_dirs = [d for d in os.listdir(adapter_base_dir) 
+                            if os.path.isdir(os.path.join(adapter_base_dir, d)) and d.startswith('lora_')]
+            adapter_dirs.sort()
+            
+            if not adapter_dirs:
+                print(f"[red]Error: No folders starting with 'lora_' found in {adapter_base_dir}[/red]")
+                return
+
+            table = Table(title="Adapter Pareto Frontier")
+            table.add_column("Adapter", justify="left", style="cyan")
+            table.add_column("Refusals", justify="right", style="red")
+            table.add_column("KL Divergence", justify="right", style="yellow")
+            
+            import time as local_time
+            csv_filename = f"adapter_metrics_{int(local_time.time())}.csv"
+            print(f"* Live data will be saved to [bold green]{csv_filename}[/bold green]")
+            
+            # Initialize unified PeftModel wrapper around the CLEAN base model
+            print(f"* Initializing with {adapter_dirs[0]}...")
+            first_adapter_path = os.path.join(adapter_base_dir, adapter_dirs[0])
+            peft_wrapped_model = PeftModel.from_pretrained(hf_model, first_adapter_path, adapter_name=adapter_dirs[0])
+            
+            # Load the remaining adapters into the same wrapper
+            for adir in adapter_dirs[1:]:
+                print(f"* Loading {adir} into memory...")
+                peft_wrapped_model.load_adapter(os.path.join(adapter_base_dir, adir), adapter_name=adir)
+            
+            # Put the unified model back into Heretic's container
+            model.model = peft_wrapped_model
+            
+            with open(csv_filename, mode='w', newline='') as file:
+                writer = csv.writer(file)
+                writer.writerow(["Adapter", "Refusals", "Total_Prompts", "KL_Divergence"])
+                
+                for adir in adapter_dirs:
+                    print(f"* Testing adapter: [bold]{adir}[/bold]...")
+                    model.model.set_adapter(adir)
+                    
+                    score, kl_div, refusals = evaluator.get_score()
+                    total_prompts = len(evaluator.bad_prompts)
+                    
+                    table.add_row(adir, f"{refusals}/{total_prompts}", f"{kl_div:.4f}")
+                    writer.writerow([adir, refusals, total_prompts, kl_div])
+                    file.flush()
+                
+            print()
+            print(table)
+            print(f"\n[bold green]Successfully saved data to {csv_filename}![/bold green]")
+            return
+
         settings.model = settings.evaluate_model
         model.reset_model()
         print("* Evaluating...")
-        evaluator.get_score()
+        score, kl_div, refusals = evaluator.get_score()
+        print(f"\n[bold]Results:[/] Refusals: {refusals}/{len(evaluator.bad_prompts)} | KL Divergence: {kl_div:.4f}")
         return
 
     print()
